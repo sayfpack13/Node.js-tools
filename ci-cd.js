@@ -38,7 +38,7 @@ app.post('/webhook', async (req, res) => {
       }
 
       // Find all package.json files recursively
-      const packageJsonFiles = await fg(['**/package.json'], { cwd: projectSourcePath, absolute: true });
+      const packageJsonFiles = await fg(['**/package.json', '!**/node_modules/**'], { cwd: projectSourcePath, absolute: true });
       let builtFolders = [];
 
       for (const pkgPath of packageJsonFiles) {
