@@ -1,4 +1,7 @@
+require('dotenv').config();
+
 const express = require('express');
+const crypto = require('crypto');
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs-extra');
@@ -7,12 +10,37 @@ const util = require('util');
 const execPromise = util.promisify(exec);
 
 const app = express();
-app.use(express.json());
 
+const GITHUB_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
 const SOURCE_BASE = '/root/ci-cd';
 const DEPLOY_BASE = '/var/www';
 
+
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
+}));
+
+
+
+function isValidSignature(req) {
+  const signature = req.headers['x-hub-signature-256'];
+  if (!signature) return false;
+
+  const hmac = crypto.createHmac('sha256', GITHUB_SECRET);
+  hmac.update(req.rawBody);
+  const digest = `sha256=${hmac.digest('hex')}`;
+
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+}
+
 app.post('/webhook', async (req, res) => {
+  if (!isValidSignature(req)) {
+    console.warn('Invalid webhook signature. Possible spoofed request.');
+    return res.status(401).send('Invalid signature');
+  }
+
   if (!req.body || !req.body.repository) {
     return res.status(400).send('Invalid GitHub webhook payload');
   }
@@ -22,10 +50,10 @@ app.post('/webhook', async (req, res) => {
   const projectSourcePath = path.join(SOURCE_BASE, repoName);
   const deployTargetPath = path.join(DEPLOY_BASE, repoName);
 
-  // Immediately respond to GitHub to avoid timeout
-  res.status(200).send('Webhook received. Deployment started in background.');
+  // Respond immediately to GitHub
+  res.status(200).send('Webhook received. Deployment starting in background.');
 
-  // Run deployment in background
+  // Background Deployment
   (async () => {
     try {
       const projectExists = fs.existsSync(projectSourcePath);
@@ -37,7 +65,7 @@ app.post('/webhook', async (req, res) => {
         await execPromise(`cd ${projectSourcePath} && git pull`);
       }
 
-      // Find all package.json files recursively
+      // Find all package.json files (excluding node_modules)
       const packageJsonFiles = await fg(['**/package.json', '!**/node_modules/**'], { cwd: projectSourcePath, absolute: true });
       let builtFolders = [];
 
@@ -61,7 +89,6 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      // Deploy last built folder's build (assume frontend)
       if (builtFolders.length > 0) {
         const lastBuildFolder = builtFolders[builtFolders.length - 1];
         const buildPath = path.join(lastBuildFolder, 'build');
@@ -72,11 +99,12 @@ app.post('/webhook', async (req, res) => {
           fs.copySync(buildPath, deployTargetPath);
           console.log(`Deployment complete for ${repoName}`);
         } else {
-          console.warn(`Expected build folder missing at ${buildPath}`);
+          console.warn(`Build folder missing at ${buildPath}`);
         }
       } else {
         console.log(`No build step found for ${repoName}. Deployment skipped.`);
       }
+
     } catch (err) {
       console.error(`Deployment failed for ${repoName}: ${err.message}`);
     }
