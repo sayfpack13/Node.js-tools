@@ -80,7 +80,7 @@ app.post('/webhook', async (req, res) => {
         }
 
         console.log(`Running npm install in ${folder}...`);
-        await execPromise(`cd ${folder} && npm install`);
+        await execPromise(`cd ${folder} && npm install --legacy-peer-deps`);
 
         if (pkgJson.scripts && pkgJson.scripts.build) {
           console.log(`Running build in ${folder}...`);
