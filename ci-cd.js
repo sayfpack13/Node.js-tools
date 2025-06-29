@@ -7,7 +7,7 @@ const fs = require('fs-extra');  // fs-extra for easy folder copying and cleanin
 const app = express();
 app.use(bodyParser.json());
 
-const SOURCE_BASE = '/var/www/deploy_sources';  // Where Git repos live
+const SOURCE_BASE = '/root/ci-cd';  // Where Git repos live
 const DEPLOY_BASE = '/var/www';                // Public deploy folder
 
 app.post('/webhook', (req, res) => {
