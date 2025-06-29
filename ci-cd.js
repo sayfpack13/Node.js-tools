@@ -1,95 +1,97 @@
 const express = require('express');
 const { exec } = require('child_process');
-const bodyParser = require('body-parser');
 const path = require('path');
-const fs = require('fs-extra');  // fs-extra for easy folder copying and cleaning
+const fs = require('fs-extra');
+const fg = require('fast-glob');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-const SOURCE_BASE = '/root/ci-cd';  // Where Git repos live
-const DEPLOY_BASE = '/var/www';     // Public deploy folder
+const SOURCE_BASE = '/root/ci-cd';
+const DEPLOY_BASE = '/var/www';
 
-app.post('/webhook', (req, res) => {
-  if (!req.body || !req.body.repository) {
-    return res.status(400).send('Invalid GitHub webhook payload');
-  }
-
-  const repoName = req.body.repository.name;
-  const cloneUrl = req.body.repository.clone_url;
-
-  if (!repoName || !cloneUrl) {
-    return res.status(400).send('Missing repository information in payload');
-  }
-
-  const projectSourcePath = path.join(SOURCE_BASE, repoName);
-  const deployTargetPath = path.join(DEPLOY_BASE, repoName);
-  const buildPath = path.join(projectSourcePath, 'build');
-
-  const projectExists = fs.existsSync(projectSourcePath);
-
-  // Build commands as an array to avoid trailing '&&' issues
-  let commands = [];
-
-  if (!projectExists) {
-    console.log(`Project folder ${projectSourcePath} does not exist. Cloning...`);
-    commands.push(`cd ${SOURCE_BASE}`);
-    commands.push(`git clone ${cloneUrl} ${repoName}`);
-  } else {
-    console.log(`Project folder ${projectSourcePath} exists. Pulling...`);
-    commands.push(`cd ${projectSourcePath}`);
-    commands.push(`git pull`);
-  }
-
-  // Check if package.json with build script exists
-  const packageJsonPath = path.join(projectSourcePath, 'package.json');
-  let hasBuildScript = false;
-
-  if (fs.existsSync(packageJsonPath)) {
-    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath));
-    hasBuildScript = packageJson.scripts && packageJson.scripts.build;
-  }
-
-  if (hasBuildScript) {
-    commands.push(`cd ${projectSourcePath}`);
-    commands.push(`npm install`);
-    commands.push(`npm run build`);
-  }
-
-  const fullCommand = commands.join(' && ');
-
-  console.log(`Running commands:\n${fullCommand}`);
-
-  exec(fullCommand, (error, stdout, stderr) => {
-    if (error) {
-      console.error(`Deployment error for ${repoName}: ${error.message}`);
-      return res.status(500).send(`Deployment failed at build/pull step: ${stderr}`);
+app.post('/webhook', async (req, res) => {
+  try {
+    if (!req.body || !req.body.repository) {
+      return res.status(400).send('Invalid GitHub webhook payload');
     }
 
-    console.log(`Build output for ${repoName}:\n${stdout}`);
+    const repoName = req.body.repository.name;
+    const cloneUrl = req.body.repository.clone_url;
+    if (!repoName || !cloneUrl) {
+      return res.status(400).send('Missing repository information in payload');
+    }
 
-    // If build exists, copy build output to deploy folder
-    if (hasBuildScript && fs.existsSync(buildPath)) {
-      console.log(`Copying build output to ${deployTargetPath}...`);
+    const projectSourcePath = path.join(SOURCE_BASE, repoName);
+    const deployTargetPath = path.join(DEPLOY_BASE, repoName);
 
+    const projectExists = fs.existsSync(projectSourcePath);
+    if (!projectExists) {
+      console.log(`Cloning ${repoName}...`);
+      await execPromise(`cd ${SOURCE_BASE} && git clone ${cloneUrl} ${repoName}`);
+    } else {
+      console.log(`Pulling latest changes for ${repoName}...`);
+      await execPromise(`cd ${projectSourcePath} && git pull`);
+    }
+
+    // Find all package.json files recursively
+    const packageJsonFiles = await fg(['**/package.json'], { cwd: projectSourcePath, absolute: true });
+
+    // Track if any build was done (for deployment)
+    let builtFolders = [];
+
+    for (const pkgPath of packageJsonFiles) {
+      const folder = path.dirname(pkgPath);
+      let pkgJson;
       try {
-        fs.removeSync(deployTargetPath);  // Delete old deploy folder
-        fs.copySync(buildPath, deployTargetPath);  // Copy new build files
-      } catch (copyError) {
-        console.error(`Error copying build files: ${copyError.message}`);
-        return res.status(500).send(`Failed to copy build files: ${copyError.message}`);
+        pkgJson = JSON.parse(fs.readFileSync(pkgPath));
+      } catch {
+        console.warn(`Could not parse ${pkgPath}, skipping.`);
+        continue;
       }
 
-      console.log(`Deployment complete for ${repoName}.`);
-      return res.send(`Deployment (build + copy) successful for ${repoName}`);
-    } else if (!hasBuildScript) {
-      console.log(`No build script found. Skipping build and copy.`);
-      return res.send(`Pull successful for ${repoName}. No build step.`);
-    } else {
-      console.error(`Build folder not found at ${buildPath}`);
-      return res.status(500).send(`Build failed: build folder missing.`);
+      console.log(`Running npm install in ${folder}...`);
+      await execPromise(`cd ${folder} && npm install`);
+
+      if (pkgJson.scripts && pkgJson.scripts.build) {
+        console.log(`Build script found in ${folder}, running build...`);
+        await execPromise(`cd ${folder} && npm run build`);
+        builtFolders.push(folder);
+      } else {
+        console.log(`No build script in ${folder}, skipping build.`);
+      }
     }
-  });
+
+    // After builds, deploy React build folders to deployTargetPath
+    // Assuming last build folder is React frontend (or you can customize)
+    if (builtFolders.length === 0) {
+      return res.send(`Pull successful for ${repoName}. No build steps.`);
+    }
+
+    // Clean deploy folder
+    fs.removeSync(deployTargetPath);
+    fs.mkdirpSync(deployTargetPath);
+
+    for (const buildFolder of builtFolders) {
+      const buildPath = path.join(buildFolder, 'build');
+      if (fs.existsSync(buildPath)) {
+        console.log(`Copying build folder from ${buildPath} to ${deployTargetPath}`);
+        fs.copySync(buildPath, deployTargetPath, { overwrite: true });
+      } else {
+        console.warn(`No build folder at ${buildPath}, skipping copy.`);
+      }
+    }
+
+    // Optionally: restart backend service here if you want
+
+    res.send(`Deployment successful for ${repoName}`);
+
+  } catch (err) {
+    console.error(`Error during deployment: ${err.message}`);
+    res.status(500).send(`Deployment failed: ${err.message}`);
+  }
 });
 
 app.listen(5001, () => console.log('GitHub Webhook listener running on port 5001'));
