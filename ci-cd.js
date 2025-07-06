@@ -80,12 +80,17 @@ app.post('/webhook', async (req, res) => {
         }
 
         console.log(`Running npm install in ${folder}...`);
-        await execPromise(`cd ${folder} && npm install --legacy-peer-deps`);
+        await execPromise(`cd ${folder} && npm install --force`);
 
         if (pkgJson.scripts && pkgJson.scripts.build) {
           console.log(`Running build in ${folder}...`);
-          await execPromise(`cd ${folder} && npm run build`);
-          builtFolders.push(folder);
+          try {
+            await execPromise(`cd ${folder} && npm run build`);
+            builtFolders.push(folder);
+          } catch (buildErr) {
+            console.error(`Build failed in ${folder}:`, buildErr.stdout || '', buildErr.stderr || '', buildErr.message);
+            throw buildErr;
+          }
         }
       }
 
@@ -107,6 +112,7 @@ app.post('/webhook', async (req, res) => {
 
     } catch (err) {
       console.error(`Deployment failed for ${repoName}: ${err.message}`);
+      console.error(err);
     }
   })();
 });
