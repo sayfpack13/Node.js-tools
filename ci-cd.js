@@ -62,7 +62,29 @@ app.post('/webhook', async (req, res) => {
         await execPromise(`cd ${SOURCE_BASE} && git clone ${cloneUrl} ${repoName}`);
       } else {
         console.log(`Pulling latest changes for ${repoName}...`);
-        await execPromise(`cd ${projectSourcePath} && git pull`);
+        try {
+          // Try a simple pull first
+          await execPromise(`cd ${projectSourcePath} && git pull`);
+        } catch (pullError) {
+          // If pull fails due to local changes, stash and retry
+          if (pullError.message.includes('would be overwritten') || pullError.message.includes('commit your changes')) {
+            console.log(`Local changes detected. Stashing changes and retrying pull for ${repoName}...`);
+            await execPromise(`cd ${projectSourcePath} && git stash`);
+            await execPromise(`cd ${projectSourcePath} && git pull`);
+            
+            // Try to apply stashed changes back (optional, might conflict)
+            try {
+              await execPromise(`cd ${projectSourcePath} && git stash pop`);
+              console.log(`Successfully applied stashed changes back for ${repoName}`);
+            } catch (stashError) {
+              console.warn(`Could not apply stashed changes for ${repoName}: ${stashError.message}`);
+              console.log(`Stashed changes are preserved and can be manually recovered if needed`);
+            }
+          } else {
+            // Re-throw if it's a different error
+            throw pullError;
+          }
+        }
       }
 
       // Find all package.json files (excluding node_modules)
