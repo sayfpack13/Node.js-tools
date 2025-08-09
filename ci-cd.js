@@ -12,7 +12,7 @@ const execPromise = util.promisify(exec);
 const app = express();
 
 const GITHUB_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
-const SOURCE_BASE = '/root/ci-cd';
+const SOURCE_BASE = '/home/ci-cd';
 const DEPLOY_BASE = '/var/www';
 
 
